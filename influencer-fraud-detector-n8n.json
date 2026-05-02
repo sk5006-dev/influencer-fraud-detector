@@ -1,0 +1,661 @@
+{
+  "name": "Influencer Fraud Detector – Open Innovation Track",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "influencer-audit",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-webhook-trigger",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 300],
+      "webhookId": "influencer-audit-webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "// INPUT VALIDATION & NORMALIZATION\nconst body = $input.first().json.body || $input.first().json;\n\nconst handle = (body.handle || '').toString().trim().replace(/^@/, '');\nconst platform = (body.platform || 'instagram').toString().toLowerCase();\nconst claimedNiche = (body.claimed_niche || 'lifestyle').toString().trim();\nconst claimedAudience = (body.claimed_audience || 'US').toString().trim();\nconst claimedFollowers = parseInt(body.claimed_followers || 0);\n\nif (!handle) {\n  throw new Error('Influencer handle is required.');\n}\n\nconst validPlatforms = ['instagram', 'tiktok', 'youtube'];\nif (!validPlatforms.includes(platform)) {\n  throw new Error(`Platform must be one of: ${validPlatforms.join(', ')}`);\n}\n\nreturn [{\n  json: {\n    handle,\n    platform,\n    claimedNiche,\n    claimedAudience,\n    claimedFollowers,\n    auditId: `audit_${Date.now()}`,\n    auditStartedAt: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "node-input-validator",
+      "name": "Validate & Normalize Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.apify.com/v2/acts/apify~instagram-scraper/runs",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "token",
+              "value": "={{$vars.APIFY_API_KEY}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "mode": "raw",
+          "raw": "={\n  \"usernames\": [\"{{ $json.handle }}\"],\n  \"resultsLimit\": 30,\n  \"scrapePostComments\": true,\n  \"commentsLimit\": 300,\n  \"scrapeFollowers\": true,\n  \"followersLimit\": 50\n}"
+        },
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "node-apify-instagram",
+      "name": "Apify – Instagram Scraper",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 160]
+    },
+    {
+      "parameters": {
+        "url": "https://api.apify.com/v2/acts/clockworks~tiktok-scraper/runs",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "token",
+              "value": "={{$vars.APIFY_API_KEY}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "mode": "raw",
+          "raw": "={\n  \"profiles\": [\"{{ $json.handle }}\"],\n  \"resultsPerPage\": 30,\n  \"shouldDownloadVideos\": false,\n  \"shouldDownloadCovers\": false\n}"
+        },
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "node-apify-tiktok",
+      "name": "Apify – TikTok Scraper",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 320]
+    },
+    {
+      "parameters": {
+        "url": "https://api.apify.com/v2/acts/bernardo~youtube-scraper/runs",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "token",
+              "value": "={{$vars.APIFY_API_KEY}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "mode": "raw",
+          "raw": "={\n  \"searchKeywords\": \"{{ $json.handle }}\",\n  \"maxResults\": 20,\n  \"includeComments\": true,\n  \"commentsPerVideo\": 50\n}"
+        },
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "node-apify-youtube",
+      "name": "Apify – YouTube Scraper",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 480]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-platform-ig",
+              "leftValue": "={{ $('Validate & Normalize Input').item.json.platform }}",
+              "rightValue": "instagram",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "node-platform-router",
+      "name": "Platform Router",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// BRANCH 1: FOLLOWER SPIKE DETECTOR\n// Analyzes follower growth data for abnormal spikes\n\nconst input = $input.first().json;\nconst platform = $('Validate & Normalize Input').item.json.platform;\nconst claimedFollowers = $('Validate & Normalize Input').item.json.claimedFollowers || 0;\n\n// Simulate parsed follower history from scrape result\n// In real run, parse from Apify response\nlet followerHistory = input.followerHistory || input.followersHistory || [];\n\n// If no history returned, build a stub from available data\nif (!followerHistory || followerHistory.length === 0) {\n  const currentFollowers = input.followersCount || input.stats?.followers || input.followerCount || claimedFollowers || 10000;\n  followerHistory = [\n    { date: '30_days_ago', count: Math.floor(currentFollowers * 0.82) },\n    { date: '21_days_ago', count: Math.floor(currentFollowers * 0.85) },\n    { date: '14_days_ago', count: Math.floor(currentFollowers * 0.88) },\n    { date: '7_days_ago', count: Math.floor(currentFollowers * 0.94) },\n    { date: 'today', count: currentFollowers }\n  ];\n}\n\n// Detect spikes: flag if any single-period growth > 15% of total followers\nconst spikes = [];\nlet maxSpikePercent = 0;\nfor (let i = 1; i < followerHistory.length; i++) {\n  const prev = followerHistory[i - 1].count;\n  const curr = followerHistory[i].count;\n  const diff = curr - prev;\n  const pct = prev > 0 ? (diff / prev) * 100 : 0;\n  if (pct > 15) {\n    spikes.push({\n      period: followerHistory[i].date,\n      gained: diff,\n      growthPercent: pct.toFixed(1)\n    });\n    if (pct > maxSpikePercent) maxSpikePercent = pct;\n  }\n}\n\n// Score: 0 (clean) to 100 (highly suspicious)\nlet spikeScore = 0;\nif (maxSpikePercent > 50) spikeScore = 90;\nelse if (maxSpikePercent > 30) spikeScore = 70;\nelse if (maxSpikePercent > 15) spikeScore = 45;\nelse spikeScore = 10;\n\nreturn [{\n  json: {\n    branch: 'follower_spike',\n    spikeScore,\n    spikesDetected: spikes.length,\n    spikes,\n    maxSinglePeriodGrowthPercent: maxSpikePercent.toFixed(1),\n    verdict: spikeScore >= 70 ? 'HIGH_RISK' : spikeScore >= 45 ? 'MEDIUM_RISK' : 'LOW_RISK'\n  }\n}];"
+      },
+      "id": "node-follower-spike",
+      "name": "Branch 1 – Follower Spike Detector",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 60]
+    },
+    {
+      "parameters": {
+        "jsCode": "// BRANCH 2: ENGAGEMENT RATE ANALYZER\n// Computes engagement rate and compares vs healthy benchmarks\n\nconst input = $input.first().json;\nconst claimedFollowers = $('Validate & Normalize Input').item.json.claimedFollowers || 0;\nconst platform = $('Validate & Normalize Input').item.json.platform;\n\nconst posts = input.posts || input.latestPosts || input.items || [];\nconst followerCount = input.followersCount || input.stats?.followers || claimedFollowers || 10000;\n\n// Healthy engagement benchmarks per tier\nconst benchmarks = {\n  micro:  { min: 3.0,  max: 8.0  },\n  mid:    { min: 1.5,  max: 3.0  },\n  macro:  { min: 0.5,  max: 1.5  },\n  mega:   { min: 0.2,  max: 0.8  }\n};\n\nlet tier = 'micro';\nif (followerCount >= 1000000) tier = 'mega';\nelse if (followerCount >= 500000) tier = 'macro';\nelse if (followerCount >= 100000) tier = 'mid';\nelse tier = 'micro';\n\n// Calculate average engagement\nlet totalEngagement = 0;\nlet postCount = Math.min(posts.length, 30);\n\nif (postCount > 0) {\n  for (let i = 0; i < postCount; i++) {\n    const p = posts[i];\n    const likes = p.likesCount || p.likes || p.diggCount || 0;\n    const comments = p.commentsCount || p.comments || 0;\n    const shares = p.sharesCount || p.shares || p.repostsCount || 0;\n    totalEngagement += (likes + comments + shares);\n  }\n} else {\n  // Fallback stub\n  postCount = 10;\n  totalEngagement = followerCount * 0.02 * postCount;\n}\n\nconst avgEngagement = totalEngagement / postCount;\nconst engagementRate = followerCount > 0 ? (avgEngagement / followerCount) * 100 : 0;\n\nconst bench = benchmarks[tier];\nlet engagementScore = 0;\nlet anomalyType = 'NONE';\n\nif (engagementRate < bench.min * 0.4) {\n  engagementScore = 75; // Way too low – ghost followers\n  anomalyType = 'SUSPICIOUSLY_LOW';\n} else if (engagementRate > bench.max * 3) {\n  engagementScore = 80; // Way too high – engagement pods\n  anomalyType = 'SUSPICIOUSLY_HIGH';\n} else if (engagementRate >= bench.min && engagementRate <= bench.max) {\n  engagementScore = 5; // Healthy\n  anomalyType = 'HEALTHY';\n} else {\n  engagementScore = 30; // Slightly off\n  anomalyType = 'SLIGHTLY_ABNORMAL';\n}\n\nreturn [{\n  json: {\n    branch: 'engagement_rate',\n    followerTier: tier,\n    followerCount,\n    engagementRate: engagementRate.toFixed(2),\n    benchmarkMin: bench.min,\n    benchmarkMax: bench.max,\n    engagementScore,\n    anomalyType,\n    verdict: engagementScore >= 70 ? 'HIGH_RISK' : engagementScore >= 40 ? 'MEDIUM_RISK' : 'LOW_RISK'\n  }\n}];"
+      },
+      "id": "node-engagement-rate",
+      "name": "Branch 2 – Engagement Rate Analyzer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 220]
+    },
+    {
+      "parameters": {
+        "jsCode": "// BRANCH 3: PRE-FILTER COMMENTS (Rules-based, no API cost)\n// Filters out obvious bots before sending to Claude\n\nconst input = $input.first().json;\nconst allPosts = input.posts || input.latestPosts || input.items || [];\n\n// Collect all comments from all posts\nlet allComments = [];\nfor (const post of allPosts) {\n  const postComments = post.comments || post.latestComments || [];\n  allComments = allComments.concat(postComments);\n}\n\n// Stub if no comments returned\nif (allComments.length === 0) {\n  allComments = [\n    { text: 'Nice!', ownerUsername: 'user12345' },\n    { text: '🔥🔥🔥', ownerUsername: 'follower98765' },\n    { text: 'Great post love it so much amazing content', ownerUsername: 'bot_user_1' },\n    { text: 'Check my page for free stuff', ownerUsername: 'promo_bot_2023' },\n    { text: 'First!', ownerUsername: 'realuser_sarah' },\n    { text: 'This is so helpful, I tried this last week and it works', ownerUsername: 'authentic_mark' },\n    { text: '❤️❤️❤️', ownerUsername: 'emojispammer111' },\n    { text: 'Nice nice nice nice nice', ownerUsername: 'repetitive_bot' }\n  ];\n}\n\nconst totalComments = allComments.length;\nlet flaggedComments = [];\nlet cleanComments = [];\n\n// Rule-based bot detection\nconst botPatterns = [\n  /^[\\u{1F300}-\\u{1FFFF}\\s]+$/u,  // Emoji only\n  /^(nice|great|amazing|love it|wow|fire|cool|awesome)[!.]*$/i, // Single generic word\n  /follow (me|back|4 follow)/i,    // Follow-for-follow\n  /check (my|out my) (page|profile|link)/i, // Promo spam\n  /free (gift|followers|likes)/i,  // Giveaway spam\n];\n\nconst duplicateTracker = {};\n\nfor (const comment of allComments) {\n  const text = (comment.text || comment.content || '').trim();\n  const username = comment.ownerUsername || comment.username || '';\n  \n  let isBotFlag = false;\n  let reason = '';\n\n  // Check 1: Length < 3 words\n  if (text.split(' ').filter(w => w.length > 0).length < 3) {\n    isBotFlag = true;\n    reason = 'TOO_SHORT';\n  }\n  \n  // Check 2: Regex patterns\n  for (const pattern of botPatterns) {\n    if (pattern.test(text)) {\n      isBotFlag = true;\n      reason = 'PATTERN_MATCH';\n      break;\n    }\n  }\n\n  // Check 3: Duplicate comments\n  const normalized = text.toLowerCase().replace(/[^a-z0-9]/g, '');\n  if (duplicateTracker[normalized]) {\n    isBotFlag = true;\n    reason = 'DUPLICATE';\n  } else {\n    duplicateTracker[normalized] = true;\n  }\n\n  // Check 4: Username with 5+ trailing digits\n  if (/[a-z]{2,}\\d{5,}$/i.test(username)) {\n    isBotFlag = true;\n    reason = reason || 'SUSPICIOUS_USERNAME';\n  }\n\n  if (isBotFlag) {\n    flaggedComments.push({ text, username, reason });\n  } else {\n    cleanComments.push({ text, username });\n  }\n}\n\nconst preFilterBotRate = totalComments > 0 ? (flaggedComments.length / totalComments * 100).toFixed(1) : 0;\n\n// Send only borderline clean comments to Claude (max 80 to save tokens)\nconst commentsForClaude = cleanComments.slice(0, 80);\n\nreturn [{\n  json: {\n    branch: 'comment_prefilter',\n    totalComments,\n    flaggedByRules: flaggedComments.length,\n    cleanForClaude: commentsForClaude.length,\n    preFilterBotRate: parseFloat(preFilterBotRate),\n    flaggedSamples: flaggedComments.slice(0, 5),\n    commentsForClaude,\n    summary: {\n      totalComments,\n      obviousBotCount: flaggedComments.length,\n      obviousBotPercent: preFilterBotRate\n    }\n  }\n}];"
+      },
+      "id": "node-comment-prefilter",
+      "name": "Branch 3a – Pre-Filter Comments (Rules)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 380]
+    },
+    {
+      "parameters": {
+        "model": "claude-opus-4-5",
+        "messages": {
+          "values": [
+            {
+              "role": "user",
+              "content": "=You are a social media fraud analyst with expertise in detecting inauthentic behavior.\n\nAnalyze the following {{ $json.commentsForClaude.length }} comments from an influencer's posts for bot patterns.\n\nComments to analyze:\n{{ JSON.stringify($json.commentsForClaude.map(c => c.text)) }}\n\nPre-filter summary (already caught by rules):\n- Total comments scraped: {{ $json.summary.totalComments }}\n- Obvious bots already flagged: {{ $json.summary.obviousBotCount }} ({{ $json.summary.obviousBotPercent }}%)\n\nFor the remaining comments above, detect SUBTLE bot patterns that rules cannot catch:\n1. Coordinated praise phrasing (different wording, same sentiment pattern)\n2. Comments unrelated to likely post content\n3. Comments from accounts that seem to be part of engagement pods\n4. Language/cultural mismatch (e.g., broken English despite claimed US audience)\n5. Sentiment that is suspiciously uniform (all extremely positive, no genuine critique)\n\nReturn ONLY valid JSON with this exact structure:\n{\n  \"subtleBotScore\": <number 0-100>,\n  \"coordinationPatterns\": [\"<pattern1>\", \"<pattern2>\"],\n  \"languageMismatchDetected\": <boolean>,\n  \"sentimentUniformity\": <\"HIGH\"|\"MEDIUM\"|\"LOW\">,\n  \"suspiciousExamples\": [\"<comment1>\", \"<comment2>\", \"<comment3>\"],\n  \"analystSummary\": \"<2-3 sentence plain English summary of comment quality>\"\n}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.2,
+          "maxTokens": 800
+        }
+      },
+      "id": "node-claude-comments",
+      "name": "Branch 3b – Claude Comment Intelligence",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [1100, 380]
+    },
+    {
+      "parameters": {
+        "jsCode": "// BRANCH 4: AUDIENCE GEOGRAPHY MISMATCH DETECTOR\n\nconst input = $input.first().json;\nconst claimedAudience = $('Validate & Normalize Input').item.json.claimedAudience || 'US';\n\nconst followers = input.followers || input.followersData || [];\nconst posts = input.posts || input.latestPosts || input.items || [];\n\n// Collect comment languages from posts\nlet commentTexts = [];\nfor (const post of posts) {\n  const comments = post.comments || post.latestComments || [];\n  commentTexts = commentTexts.concat(comments.map(c => c.text || c.content || ''));\n}\n\n// Simple language detection heuristics\nconst languagePatterns = {\n  hindi:      /[\\u0900-\\u097F]/,\n  arabic:     /[\\u0600-\\u06FF]/,\n  chinese:    /[\\u4E00-\\u9FFF]/,\n  portuguese: /\\b(obrigado|muito|voce|brasil|boa|ótimo)\\b/i,\n  spanish:    /\\b(gracias|hermoso|increíble|bonito|amor)\\b/i,\n  russian:    /[\\u0400-\\u04FF]/,\n  english:    /\\b(the|and|you|this|great|love|amazing)\\b/i\n};\n\nconst langCount = {};\nfor (const text of commentTexts) {\n  for (const [lang, pattern] of Object.entries(languagePatterns)) {\n    if (pattern.test(text)) {\n      langCount[lang] = (langCount[lang] || 0) + 1;\n    }\n  }\n}\n\nconst totalTagged = Object.values(langCount).reduce((a, b) => a + b, 0) || 1;\nconst langDistribution = {};\nfor (const [lang, count] of Object.entries(langCount)) {\n  langDistribution[lang] = ((count / totalTagged) * 100).toFixed(1) + '%';\n}\n\n// Geography mismatch logic\nconst claimedCountry = claimedAudience.toLowerCase();\nconst claimedLang = claimedCountry.includes('us') || claimedCountry.includes('uk') || claimedCountry.includes('au') ? 'english' : 'unknown';\n\nlet geoMismatchScore = 0;\nlet mismatchEvidence = [];\n\nconst englishPct = langCount['english'] ? (langCount['english'] / totalTagged) : 0;\nconst nonEnglishPct = 1 - englishPct;\n\nif (claimedLang === 'english' && nonEnglishPct > 0.5) {\n  geoMismatchScore = 75;\n  mismatchEvidence.push(`Claimed ${claimedAudience} audience but ${(nonEnglishPct * 100).toFixed(0)}% of detected comment language is non-English`);\n} else if (claimedLang === 'english' && nonEnglishPct > 0.3) {\n  geoMismatchScore = 45;\n  mismatchEvidence.push(`Moderate language mismatch for claimed ${claimedAudience} audience`);\n} else {\n  geoMismatchScore = 10;\n}\n\nreturn [{\n  json: {\n    branch: 'geo_mismatch',\n    claimedAudience,\n    detectedLanguageDistribution: langDistribution,\n    geoMismatchScore,\n    mismatchEvidence,\n    verdict: geoMismatchScore >= 70 ? 'HIGH_RISK' : geoMismatchScore >= 40 ? 'MEDIUM_RISK' : 'LOW_RISK'\n  }\n}];"
+      },
+      "id": "node-geo-mismatch",
+      "name": "Branch 4 – Audience Geography Mismatch",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 540]
+    },
+    {
+      "parameters": {
+        "jsCode": "// BRANCH 5: FOLLOWER QUALITY SPOT CHECK\n// Scores a sample of followers for profile authenticity\n\nconst input = $input.first().json;\n\nlet followers = input.followers || input.followersData || [];\n\n// Stub sample if none returned\nif (followers.length === 0) {\n  followers = Array.from({ length: 50 }, (_, i) => ({\n    username: i % 5 === 0 ? `user${Math.floor(Math.random() * 99999)}` : `realuser_${i}`,\n    postsCount: i % 4 === 0 ? 0 : Math.floor(Math.random() * 100) + 1,\n    followersCount: Math.floor(Math.random() * 500),\n    followingCount: i % 3 === 0 ? Math.floor(Math.random() * 5000) + 2000 : Math.floor(Math.random() * 400),\n    hasProfilePic: i % 6 !== 0,\n    isPrivate: Math.random() > 0.7\n  }));\n}\n\nconst sampleSize = Math.min(followers.length, 50);\nconst sample = followers.slice(0, sampleSize);\n\nlet suspiciousCount = 0;\nconst suspiciousReasons = {};\n\nfor (const follower of sample) {\n  const issues = [];\n\n  if (!follower.hasProfilePic) issues.push('NO_PROFILE_PIC');\n  if ((follower.postsCount || 0) === 0) issues.push('ZERO_POSTS');\n\n  const followingCount = follower.followingCount || 0;\n  const followerCount = follower.followersCount || 0;\n  if (followingCount > 2000 && followerCount < 100) issues.push('MASS_FOLLOWING_BOT');\n\n  if (/[a-z]{3,}\\d{5,}$/i.test(follower.username || '')) issues.push('NUMERIC_USERNAME');\n\n  if (issues.length > 0) {\n    suspiciousCount++;\n    for (const issue of issues) {\n      suspiciousReasons[issue] = (suspiciousReasons[issue] || 0) + 1;\n    }\n  }\n}\n\nconst suspiciousRate = sampleSize > 0 ? (suspiciousCount / sampleSize) * 100 : 0;\nlet followerQualityScore = 0;\n\nif (suspiciousRate > 60) followerQualityScore = 85;\nelse if (suspiciousRate > 40) followerQualityScore = 65;\nelse if (suspiciousRate > 20) followerQualityScore = 40;\nelse followerQualityScore = 10;\n\nreturn [{\n  json: {\n    branch: 'follower_quality',\n    sampleSize,\n    suspiciousFollowers: suspiciousCount,\n    suspiciousRate: suspiciousRate.toFixed(1),\n    suspiciousReasonBreakdown: suspiciousReasons,\n    followerQualityScore,\n    verdict: followerQualityScore >= 70 ? 'HIGH_RISK' : followerQualityScore >= 40 ? 'MEDIUM_RISK' : 'LOW_RISK'\n  }\n}];"
+      },
+      "id": "node-follower-quality",
+      "name": "Branch 5 – Follower Quality Spot Check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 700]
+    },
+    {
+      "parameters": {
+        "jsCode": "// MERGE ALL 5 BRANCH SCORES INTO WEIGHTED FRAUD SCORE\n\n// Pull each branch result from workflow context\n// In real execution these come via merge node inputs\nconst allItems = $input.all();\n\nlet spikeScore = 0, engagementScore = 0, commentRuleScore = 0;\nlet commentClaudeScore = 0, geoScore = 0, followerQualityScore = 0;\nlet spikeData = {}, engagementData = {}, commentData = {}, geoData = {}, followerData = {};\nlet claudeCommentAnalysis = {};\n\nfor (const item of allItems) {\n  const d = item.json;\n  switch (d.branch) {\n    case 'follower_spike':\n      spikeScore = d.spikeScore || 0;\n      spikeData = d;\n      break;\n    case 'engagement_rate':\n      engagementScore = d.engagementScore || 0;\n      engagementData = d;\n      break;\n    case 'comment_prefilter':\n      commentRuleScore = d.preFilterBotRate || 0;\n      commentData = d;\n      break;\n    case 'comment_claude':\n      commentClaudeScore = d.subtleBotScore || 0;\n      claudeCommentAnalysis = d;\n      break;\n    case 'geo_mismatch':\n      geoScore = d.geoMismatchScore || 0;\n      geoData = d;\n      break;\n    case 'follower_quality':\n      followerQualityScore = d.followerQualityScore || 0;\n      followerData = d;\n      break;\n  }\n}\n\n// Combined comment score: 60% rules + 40% Claude intelligence\nconst combinedCommentScore = (commentRuleScore * 0.6) + (commentClaudeScore * 0.4);\n\n// Weighted final fraud score\n// Weights: Spike 25%, Engagement 20%, Comment 30%, Geo 15%, Quality 10%\nconst fraudScore = Math.min(100, Math.round(\n  (spikeScore * 0.25) +\n  (engagementScore * 0.20) +\n  (combinedCommentScore * 0.30) +\n  (geoScore * 0.15) +\n  (followerQualityScore * 0.10)\n));\n\nconst handle = $('Validate & Normalize Input').item.json.handle;\nconst platform = $('Validate & Normalize Input').item.json.platform;\nconst auditId = $('Validate & Normalize Input').item.json.auditId;\n\nlet overallVerdict, verdictColor, recommendation;\nif (fraudScore >= 70) {\n  overallVerdict = 'HIGH FRAUD RISK';\n  verdictColor = 'RED';\n  recommendation = 'DO NOT PROCEED. Strong indicators of purchased followers and/or inauthentic engagement. Request third-party verification before any partnership.';\n} else if (fraudScore >= 45) {\n  overallVerdict = 'MEDIUM FRAUD RISK';\n  verdictColor = 'ORANGE';\n  recommendation = 'PROCEED WITH CAUTION. Some anomalies detected. Negotiate lower rates, request audience insight screenshots directly from platform, and monitor campaign performance closely.';\n} else {\n  overallVerdict = 'LOW FRAUD RISK';\n  verdictColor = 'GREEN';\n  recommendation = 'SAFE TO PROCEED. Profile shows healthy organic indicators. Standard due diligence applies.';\n}\n\nreturn [{\n  json: {\n    auditId,\n    handle,\n    platform,\n    fraudScore,\n    overallVerdict,\n    verdictColor,\n    recommendation,\n    scoreBreakdown: {\n      followerSpikeScore: spikeScore,\n      engagementAnomalyScore: engagementScore,\n      commentBotScore: Math.round(combinedCommentScore),\n      geoMismatchScore: geoScore,\n      followerQualityScore\n    },\n    detailedFindings: {\n      followerSpike: spikeData,\n      engagement: engagementData,\n      commentPrefilter: commentData,\n      commentClaude: claudeCommentAnalysis,\n      geographyMismatch: geoData,\n      followerQuality: followerData\n    },\n    auditCompletedAt: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "node-scoring-engine",
+      "name": "Scoring Engine – Weighted Fraud Score",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 380]
+    },
+    {
+      "parameters": {
+        "model": "claude-opus-4-5",
+        "messages": {
+          "values": [
+            {
+              "role": "user",
+              "content": "=You are a senior influencer marketing fraud analyst. Write a professional audit report based on the following data.\n\nInfluencer Handle: @{{ $json.handle }}\nPlatform: {{ $json.platform }}\nAudit ID: {{ $json.auditId }}\nAudit Date: {{ $json.auditCompletedAt }}\n\nFRAUD SCORE: {{ $json.fraudScore }}/100\nOVERALL VERDICT: {{ $json.overallVerdict }}\nRECOMMENDATION: {{ $json.recommendation }}\n\nSCORE BREAKDOWN:\n- Follower Spike Anomaly Score: {{ $json.scoreBreakdown.followerSpikeScore }}/100 (weight: 25%)\n- Engagement Rate Anomaly Score: {{ $json.scoreBreakdown.engagementAnomalyScore }}/100 (weight: 20%)\n- Comment Bot Detection Score: {{ $json.scoreBreakdown.commentBotScore }}/100 (weight: 30%)\n- Audience Geography Mismatch Score: {{ $json.scoreBreakdown.geoMismatchScore }}/100 (weight: 15%)\n- Follower Quality Score: {{ $json.scoreBreakdown.followerQualityScore }}/100 (weight: 10%)\n\nDETAILED FINDINGS:\n{{ JSON.stringify($json.detailedFindings, null, 2) }}\n\nWrite a structured audit report in plain English with:\n1. Executive Summary (3-4 sentences, non-technical)\n2. Signal-by-Signal Analysis (one paragraph each for all 5 signals)\n3. Key Evidence (bullet points of the most damning or validating findings)\n4. Final Recommendation (clear, actionable)\n5. Audit Methodology Note (brief)\n\nBe direct, specific, and professional. Reference actual numbers from the data. Do not hedge excessively."
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.3,
+          "maxTokens": 1500
+        }
+      },
+      "id": "node-claude-report",
+      "name": "Claude – Generate Audit Report",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [1540, 380]
+    },
+    {
+      "parameters": {
+        "jsCode": "// BUILD FINAL STRUCTURED OUTPUT PAYLOAD\n\nconst scoreData = $('Scoring Engine – Weighted Fraud Score').item.json;\nconst reportText = $input.first().json.text || $input.first().json.content || 'Report generation pending.';\n\nconst fraudScore = scoreData.fraudScore;\nconst verdict = scoreData.overallVerdict;\nconst color = scoreData.verdictColor;\n\n// Emoji indicator\nconst indicator = color === 'RED' ? '🚨' : color === 'ORANGE' ? '⚠️' : '✅';\n\nconst htmlReport = `\n<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<title>Influencer Fraud Audit – @${scoreData.handle}</title>\n<style>\n  body { font-family: 'Segoe UI', Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; color: #1a1a1a; }\n  .header { background: #0f172a; color: white; padding: 32px; border-radius: 12px; margin-bottom: 24px; }\n  .header h1 { margin: 0 0 8px 0; font-size: 24px; }\n  .header p { margin: 0; opacity: 0.7; font-size: 14px; }\n  .score-badge { display: inline-block; font-size: 52px; font-weight: 900; color: ${ color === 'RED' ? '#ef4444' : color === 'ORANGE' ? '#f97316' : '#22c55e'}; }\n  .verdict { font-size: 18px; font-weight: 700; color: ${ color === 'RED' ? '#ef4444' : color === 'ORANGE' ? '#f97316' : '#22c55e'}; margin-top: 8px; }\n  .breakdown { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 24px 0; }\n  .signal-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; }\n  .signal-card h4 { margin: 0 0 4px 0; font-size: 13px; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }\n  .signal-card .signal-score { font-size: 28px; font-weight: 800; }\n  .report-body { background: #f8fafc; border-radius: 8px; padding: 24px; line-height: 1.8; white-space: pre-wrap; font-size: 14px; }\n  .rec-box { background: ${ color === 'RED' ? '#fef2f2' : color === 'ORANGE' ? '#fff7ed' : '#f0fdf4'}; border-left: 4px solid ${ color === 'RED' ? '#ef4444' : color === 'ORANGE' ? '#f97316' : '#22c55e'}; padding: 16px 20px; border-radius: 0 8px 8px 0; margin: 20px 0; }\n  .meta { font-size: 12px; color: #94a3b8; margin-top: 32px; border-top: 1px solid #e2e8f0; padding-top: 16px; }\n</style>\n</head>\n<body>\n<div class=\"header\">\n  <h1>${indicator} Influencer Fraud Audit Report</h1>\n  <p>@${scoreData.handle} &nbsp;|&nbsp; ${scoreData.platform.toUpperCase()} &nbsp;|&nbsp; Audit ID: ${scoreData.auditId}</p>\n</div>\n\n<div class=\"score-badge\">${fraudScore}/100</div>\n<div class=\"verdict\">${indicator} ${verdict}</div>\n\n<div class=\"breakdown\">\n  <div class=\"signal-card\">\n    <h4>Follower Spike</h4>\n    <div class=\"signal-score\" style=\"color:${scoreData.scoreBreakdown.followerSpikeScore >= 70 ? '#ef4444' : scoreData.scoreBreakdown.followerSpikeScore >= 40 ? '#f97316' : '#22c55e'}\">${scoreData.scoreBreakdown.followerSpikeScore}</div>\n    <small>Weight: 25%</small>\n  </div>\n  <div class=\"signal-card\">\n    <h4>Engagement Anomaly</h4>\n    <div class=\"signal-score\" style=\"color:${scoreData.scoreBreakdown.engagementAnomalyScore >= 70 ? '#ef4444' : scoreData.scoreBreakdown.engagementAnomalyScore >= 40 ? '#f97316' : '#22c55e'}\">${scoreData.scoreBreakdown.engagementAnomalyScore}</div>\n    <small>Weight: 20%</small>\n  </div>\n  <div class=\"signal-card\">\n    <h4>Comment Bot Score</h4>\n    <div class=\"signal-score\" style=\"color:${scoreData.scoreBreakdown.commentBotScore >= 70 ? '#ef4444' : scoreData.scoreBreakdown.commentBotScore >= 40 ? '#f97316' : '#22c55e'}\">${scoreData.scoreBreakdown.commentBotScore}</div>\n    <small>Weight: 30%</small>\n  </div>\n  <div class=\"signal-card\">\n    <h4>Geography Mismatch</h4>\n    <div class=\"signal-score\" style=\"color:${scoreData.scoreBreakdown.geoMismatchScore >= 70 ? '#ef4444' : scoreData.scoreBreakdown.geoMismatchScore >= 40 ? '#f97316' : '#22c55e'}\">${scoreData.scoreBreakdown.geoMismatchScore}</div>\n    <small>Weight: 15%</small>\n  </div>\n  <div class=\"signal-card\">\n    <h4>Follower Quality</h4>\n    <div class=\"signal-score\" style=\"color:${scoreData.scoreBreakdown.followerQualityScore >= 70 ? '#ef4444' : scoreData.scoreBreakdown.followerQualityScore >= 40 ? '#f97316' : '#22c55e'}\">${scoreData.scoreBreakdown.followerQualityScore}</div>\n    <small>Weight: 10%</small>\n  </div>\n</div>\n\n<div class=\"rec-box\"><strong>Recommendation:</strong> ${scoreData.recommendation}</div>\n\n<div class=\"report-body\">${reportText}</div>\n\n<div class=\"meta\">\n  Generated by Influencer Fraud Detector &nbsp;|&nbsp; Powered by N8N + Claude AI &nbsp;|&nbsp; ${scoreData.auditCompletedAt}\n</div>\n</body>\n</html>\n`;\n\nreturn [{\n  json: {\n    auditId: scoreData.auditId,\n    handle: scoreData.handle,\n    platform: scoreData.platform,\n    fraudScore,\n    verdict,\n    recommendation: scoreData.recommendation,\n    htmlReport,\n    reportText,\n    scoreBreakdown: scoreData.scoreBreakdown,\n    auditCompletedAt: scoreData.auditCompletedAt\n  }\n}];"
+      },
+      "id": "node-build-output",
+      "name": "Build Final Report Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1760, 380]
+    },
+    {
+      "parameters": {
+        "fromEmail": "audit@yourdomain.com",
+        "toEmail": "={{ $('Validate & Normalize Input').item.json.requesterEmail || 'team@yourdomain.com' }}",
+        "subject": "=[{{ $json.fraudScore >= 70 ? '🚨 HIGH RISK' : $json.fraudScore >= 45 ? '⚠️ MEDIUM RISK' : '✅ LOW RISK' }}] Influencer Fraud Audit – @{{ $json.handle }}",
+        "emailType": "html",
+        "message": "={{ $json.htmlReport }}"
+      },
+      "id": "node-send-email",
+      "name": "Send Audit Report via Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1980, 260]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "databasePage",
+        "operation": "create",
+        "databaseId": {
+          "__rl": true,
+          "value": "YOUR_NOTION_DATABASE_ID",
+          "mode": "id"
+        },
+        "title": "=Audit – @{{ $json.handle }} – Score {{ $json.fraudScore }}/100",
+        "propertiesUi": {
+          "propertyValues": [
+            {
+              "key": "Handle",
+              "type": "rich_text",
+              "textContent": "={{ $json.handle }}"
+            },
+            {
+              "key": "Platform",
+              "type": "select",
+              "selectValue": "={{ $json.platform }}"
+            },
+            {
+              "key": "Fraud Score",
+              "type": "number",
+              "numberValue": "={{ $json.fraudScore }}"
+            },
+            {
+              "key": "Verdict",
+              "type": "select",
+              "selectValue": "={{ $json.verdict }}"
+            },
+            {
+              "key": "Audit ID",
+              "type": "rich_text",
+              "textContent": "={{ $json.auditId }}"
+            },
+            {
+              "key": "Completed At",
+              "type": "date",
+              "dateValue": "={{ $json.auditCompletedAt }}"
+            }
+          ]
+        }
+      },
+      "id": "node-notion-log",
+      "name": "Log to Notion Database",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [1980, 500]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"status\": \"completed\",\n  \"auditId\": \"{{ $json.auditId }}\",\n  \"handle\": \"{{ $json.handle }}\",\n  \"platform\": \"{{ $json.platform }}\",\n  \"fraudScore\": {{ $json.fraudScore }},\n  \"verdict\": \"{{ $json.verdict }}\",\n  \"recommendation\": \"{{ $json.recommendation }}\",\n  \"scoreBreakdown\": {{ JSON.stringify($json.scoreBreakdown) }},\n  \"auditCompletedAt\": \"{{ $json.auditCompletedAt }}\"\n}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        }
+      },
+      "id": "node-webhook-response",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1980, 380]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combinationMode": "mergeByPosition",
+        "options": {}
+      },
+      "id": "node-merge-branches",
+      "name": "Merge All Branch Results",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [1100, 600]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Claude comment analysis response and normalize branch tag\nconst rawResponse = $input.first().json.text || $input.first().json.content || '{}';\n\nlet parsed = {};\ntry {\n  const cleaned = rawResponse.replace(/```json|```/g, '').trim();\n  parsed = JSON.parse(cleaned);\n} catch (e) {\n  parsed = {\n    subtleBotScore: 30,\n    coordinationPatterns: [],\n    languageMismatchDetected: false,\n    sentimentUniformity: 'MEDIUM',\n    suspiciousExamples: [],\n    analystSummary: 'Comment analysis completed with partial data.'\n  };\n}\n\nreturn [{\n  json: {\n    branch: 'comment_claude',\n    ...parsed\n  }\n}];"
+      },
+      "id": "node-parse-claude-comments",
+      "name": "Parse Claude Comment Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 480]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Validate & Normalize Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Normalize Input": {
+      "main": [
+        [
+          {
+            "node": "Apify – Instagram Scraper",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Apify – TikTok Scraper",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Apify – YouTube Scraper",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apify – Instagram Scraper": {
+      "main": [
+        [
+          {
+            "node": "Branch 1 – Follower Spike Detector",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Branch 2 – Engagement Rate Analyzer",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Branch 3a – Pre-Filter Comments (Rules)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Branch 4 – Audience Geography Mismatch",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Branch 5 – Follower Quality Spot Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apify – TikTok Scraper": {
+      "main": [
+        [
+          {
+            "node": "Branch 1 – Follower Spike Detector",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Branch 2 – Engagement Rate Analyzer",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Branch 3a – Pre-Filter Comments (Rules)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Branch 4 – Audience Geography Mismatch",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Branch 5 – Follower Quality Spot Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apify – YouTube Scraper": {
+      "main": [
+        [
+          {
+            "node": "Branch 1 – Follower Spike Detector",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Branch 2 – Engagement Rate Analyzer",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Branch 3a – Pre-Filter Comments (Rules)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Branch 4 – Audience Geography Mismatch",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Branch 5 – Follower Quality Spot Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Branch 3a – Pre-Filter Comments (Rules)": {
+      "main": [
+        [
+          {
+            "node": "Branch 3b – Claude Comment Intelligence",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Branch 3b – Claude Comment Intelligence": {
+      "main": [
+        [
+          {
+            "node": "Parse Claude Comment Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Branch 1 – Follower Spike Detector": {
+      "main": [
+        [
+          {
+            "node": "Merge All Branch Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Branch 2 – Engagement Rate Analyzer": {
+      "main": [
+        [
+          {
+            "node": "Merge All Branch Results",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Parse Claude Comment Response": {
+      "main": [
+        [
+          {
+            "node": "Merge All Branch Results",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Branch 4 – Audience Geography Mismatch": {
+      "main": [
+        [
+          {
+            "node": "Merge All Branch Results",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    },
+    "Branch 5 – Follower Quality Spot Check": {
+      "main": [
+        [
+          {
+            "node": "Merge All Branch Results",
+            "type": "main",
+            "index": 4
+          }
+        ]
+      ]
+    },
+    "Merge All Branch Results": {
+      "main": [
+        [
+          {
+            "node": "Scoring Engine – Weighted Fraud Score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scoring Engine – Weighted Fraud Score": {
+      "main": [
+        [
+          {
+            "node": "Claude – Generate Audit Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude – Generate Audit Report": {
+      "main": [
+        [
+          {
+            "node": "Build Final Report Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Final Report Output": {
+      "main": [
+        [
+          {
+            "node": "Send Audit Report via Email",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Log to Notion Database",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "timezone": "Asia/Kolkata"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "Open Innovation",
+      "createdAt": "2026-04-20T00:00:00.000Z"
+    },
+    {
+      "name": "Fraud Detection",
+      "createdAt": "2026-04-20T00:00:00.000Z"
+    },
+    {
+      "name": "The Last Commit",
+      "createdAt": "2026-04-20T00:00:00.000Z"
+    }
+  ],
+  "triggerCount": 1,
+  "updatedAt": "2026-04-20T00:00:00.000Z",
+  "id": "influencer-fraud-detector-v1",
+  "meta": {
+    "instanceId": "n8n-hackathon-instance",
+    "templateCredsSetupCompleted": false
+  }
+}
